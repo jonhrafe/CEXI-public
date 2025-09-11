@@ -1,0 +1,12 @@
+# CEXI Tutorial Requirements
+# Core scientific computing
+numpy>=1.19.0
+scipy>=1.5.0
+matplotlib>=3.3.0
+
+# Jupyter notebook support
+jupyter>=1.0.0
+ipython>=7.0.0
+
+# Optional: Enhanced notebook features
+ipywidgets>=7.5.0
