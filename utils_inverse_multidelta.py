@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-Enhanced utils_inverse with full multi-delta/multi-timing support - PAPER ALIGNED VERSION.
-Each b-value can have its own (delta, tdiff, G) parameters.
+CEXI (Cellular Exchange Imaging): two-compartment permeable-sphere model for the
+diffusion-MRI signal, with full multi-delta / multi-timing support (each b-value
+can have its own delta, tdiff, G).
 
-FIXES IMPLEMENTED:
-1. Permeability-rate mapping includes (1-f) factor per CEXI paper
-2. Proper sphere signal using canonical series (Eq. 1) without empirical factors
-3. Clear units documentation and validation
-4. High permeability regime warnings
+Model
+-----
+1. Intracellular compartment: restricted diffusion inside a sphere of radius R,
+   computed with the van Gelderen / Murday-Cotts Gaussian-Phase-Distribution
+   series (reflecting-boundary eigenvalues, the zeros of j'_1).
+2. Extracellular compartment: Gaussian (hindered) diffusion with diffusivity De.
+3. Water exchange across the membrane via the Kärger model, with
+   k_i = 3*kappa/R and k_e = k_i*f/(1-f) (detailed balance).
+
+Parameters: R (um), Di, De (m^2/s), f (intracellular fraction), kappa (um/s).
 """
 
 import numpy as np
-from scipy.special import jnp_zeros
 from scipy.optimize import minimize
 import warnings
 
@@ -32,7 +37,7 @@ MUM_TO_M = 1e-6
 
 # Model limits
 PERM_MIN = 0.01  # Minimum permeability in μm/s
-PERM_MAX_STABLE = 50.0  # Maximum stable permeability in μm/s (paper reports instability above this)
+PERM_MAX_STABLE = 50.0  # μm/s; above this, exchange estimation is less stable
 
 # ============================================================================
 # BESSEL FUNCTION ROOTS FOR SPHERE MODEL
@@ -40,24 +45,35 @@ PERM_MAX_STABLE = 50.0  # Maximum stable permeability in μm/s (paper reports in
 
 def get_bessel_roots_sphere(n_max=32):
     """
-    Get first n_max roots of spherical Bessel function equation
-    j'_1(x) = 0 where j_1 is the spherical Bessel function of order 1
-    
-    These are the correct roots for reflecting boundary conditions in spheres.
-    Reference: Callaghan, "Principles of Nuclear Magnetic Resonance Microscopy"
+    Get first n_max positive roots of  j'_1(x) = 0, where j_1 is the spherical
+    Bessel function of order 1.
+
+    These satisfy the REFLECTING (no-flux, Neumann) boundary condition at the
+    surface of an impermeable sphere and are the correct eigenvalues for the
+    van Gelderen / Murday-Cotts restricted-diffusion GPD expression.
+
+    j'_1(x) = 0  <=>  (x^2 - 2) sin(x) + 2 x cos(x) = 0   (x > 0)
+
+    The first roots are 2.0816, 5.9404, 9.2058, ...
+
+    Reference: van Gelderen et al., JMR B 103 (1994) 255-260; Callaghan,
+    "Principles of Nuclear Magnetic Resonance Microscopy".
     """
-    # Correct roots for j'_1(x) = 0 (zeros of derivative of spherical Bessel j_1)
-    # These satisfy the reflecting boundary condition at the sphere surface
-    return np.array([
-        4.493409457909, 7.725251836938, 10.904121659429, 14.066193912832,
-        17.220755271931, 20.371302959287, 23.519452498689, 26.666054258813,
-        29.811598790892, 32.956389039822, 36.100622425794, 39.244482484224,
-        42.387973605668, 45.531055768861, 48.673724750269, 51.816190642933,
-        54.958362532041, 58.100435225362, 61.242318711251, 64.384114451789,
-        67.525757043629, 70.667358629256, 73.808882279479, 76.950361143690,
-        80.091796042031, 83.233193347437, 86.374558176847, 89.515894403300,
-        92.657205253581, 95.798493520996, 98.939761627913, 102.081011712616
-    ])[:n_max]
+    from scipy.optimize import brentq
+
+    # j'_1(x) up to a positive prefactor that never vanishes for x > 0
+    g = lambda x: (x ** 2 - 2.0) * np.sin(x) + 2.0 * x * np.cos(x)
+
+    # Roots are spaced by ~pi; scan a grid and bracket every sign change.
+    x = np.linspace(1e-4, (n_max + 2) * np.pi, 20000)
+    gv = g(x)
+    roots = []
+    for i in range(len(x) - 1):
+        if gv[i] * gv[i + 1] < 0:
+            roots.append(brentq(g, x[i], x[i + 1]))
+        if len(roots) >= n_max:
+            break
+    return np.array(roots[:n_max])
 
 # Get roots for use in GPD model
 BES_ROOTS = get_bessel_roots_sphere(32)
@@ -170,11 +186,10 @@ class Protocol:
 
 def sphere_signal_series(R, D, b, delta, tdiff, n_max=32):
     """
-    Calculate restricted diffusion signal in spheres using GPD approximation.
-    Based on Callaghan's Gaussian Phase Distribution for PGSE.
-    
-    Uses the working formula from the original implementation,
-    with calibrated normalization factor.
+    Calculate restricted diffusion signal in spheres using the GPD approximation
+    (van Gelderen / Murday-Cotts) for a PGSE sequence.
+
+    Uses the reflecting-boundary eigenvalues (zeros of j'_1).
     
     Parameters:
     -----------
@@ -201,9 +216,8 @@ def sphere_signal_series(R, D, b, delta, tdiff, n_max=32):
     lambda_k = BES_ROOTS[:n_max] / R  # 1/m
     am = lambda_k**2  # 1/m²
     
-    # GPD denominator - using calibrated normalization
-    # The factor is empirically calibrated to match expected physics
-    denom = D**2 * am**3 * (am * R**2 - 2) / 66.0
+    # GPD denominator (van Gelderen):  D^2 * alpha_k^6 * (alpha_k^2 R^2 - 2)
+    denom = D**2 * am**3 * (am * R**2 - 2)
     
     # Time-dependent terms - include D in the exponential arguments
     sda2 = D * delta * am  # D * δ * α² (dimensionless)
@@ -278,7 +292,6 @@ def SPHERE_sig(R, D, protocol, normalize=False):
         if protocol.b[i] == 0:
             S[i] = 1.0
         else:
-            # Use canonical series implementation
             S[i] = sphere_signal_series(
                 R_m, D, 
                 protocol.b[i], 
@@ -297,13 +310,9 @@ def SPHERE_sig(R, D, protocol, normalize=False):
 
 def CEXI_sig(R, Di, De, f, kappa, protocol, normalize=False):
     """
-    CEXI signal model with Kärger exchange - PAPER-ALIGNED VERSION.
-    
-    Key fixes:
-    1. Permeability-rate mapping includes (1-f) factor
-    2. Uses canonical sphere signal without empirical corrections
-    3. Validates parameters and warns about instability
-    
+    CEXI signal model: restricted-sphere intracellular + Gaussian extracellular
+    compartments coupled by Kärger water exchange.
+
     Parameters:
     -----------
     R : float
@@ -374,14 +383,18 @@ def CEXI_sig(R, Di, De, f, kappa, protocol, normalize=False):
             # Impermeable case - no exchange
             S[i] = f * np.exp(-Di_app * b * 1e6) + (1-f) * np.exp(-De * b * 1e6)
         else:
-            # FIXED: Calculate exchange rates with (1-f) factor per paper
-            # Paper: k_i = (1-f) * 3κ/R
-            ki = (1 - f) * (3.0 * kappa_SI / R_SI)  # 1/s
-            ke = f * (3.0 * kappa_SI / R_SI)        # From conservation: ki*f = ke*(1-f)
-            
+            # Kärger exchange rates.
+            # Intracellular efflux rate is a LOCAL cell property and depends only
+            # on permeability and surface-to-volume ratio (3/R for a sphere):
+            #     k_i = kappa * (S/V) = 3 kappa / R        (independent of f)
+            # The influx rate follows from detailed balance (mass conservation):
+            #     f * k_i = (1 - f) * k_e   =>   k_e = k_i * f / (1 - f)
+            ki = 3.0 * kappa_SI / R_SI              # 1/s, intracellular efflux
+            ke = ki * f / (1.0 - f)                 # 1/s, extracellular influx
+
             # Exchange times
-            tie = 1.0 / ki  # Intracellular to extracellular time
-            tei = 1.0 / ke  # Extracellular to intracellular time
+            tie = 1.0 / ki  # Intracellular residence time  R/(3 kappa)
+            tei = 1.0 / ke  # Extracellular residence time
             
             q2tie = q2 * tie
             q2tei = q2 * tei
@@ -454,30 +467,88 @@ def generate_noisy_signal(clean_signal, SNR=20, noise_type='rician'):
 # MODEL FITTING
 # ============================================================================
 
-def fit_CEXI(signal_data, protocol, bounds=None, n_init=5):
+# Parameter order used by the fitter and the encode/decode transforms.
+FIT_PARAM_KEYS = ['R', 'Di', 'De', 'f', 'kappa']
+
+# Parameters optimized on a logarithmic axis. The CEXI signal spans several
+# orders of magnitude in permeability and the diffusivities differ from the
+# radius by ~9 orders of magnitude (m²/s vs μm); normalizing every parameter
+# to [0, 1] - and using a log axis where sensitivity is ~log - makes the
+# finite-difference gradients well conditioned for L-BFGS-B.
+FIT_LOG_KEYS = ('Di', 'De', 'kappa')
+
+
+def _make_param_transforms(bounds, log_keys=FIT_LOG_KEYS):
     """
-    Fit CEXI model to signal data with paper-aligned implementation.
-    
-    Parameters:
-    -----------
+    Build per-parameter encode (physical -> [0, 1]) and decode ([0, 1] ->
+    physical) functions from a bounds dict. Linear within bounds, except for
+    `log_keys` which are mapped on a logarithmic axis.
+
+    Returns
+    -------
+    encode : callable(dict-or-list) -> np.ndarray   physical -> unit cube
+    decode : callable(np.ndarray)   -> dict         unit cube -> physical
+    """
+    los, his, is_log = [], [], []
+    for k in FIT_PARAM_KEYS:
+        lo, hi = bounds[k]
+        use_log = (k in log_keys) and (lo > 0)
+        if use_log:
+            lo, hi = np.log(lo), np.log(hi)
+        los.append(lo); his.append(hi); is_log.append(use_log)
+    los, his, is_log = np.array(los), np.array(his), np.array(is_log)
+    span = np.where(his > los, his - los, 1.0)
+
+    def encode(params):
+        x = np.array([params[k] for k in FIT_PARAM_KEYS], dtype=float) \
+            if isinstance(params, dict) else np.asarray(params, dtype=float)
+        x = np.where(is_log, np.log(np.clip(x, EPS, None)), x)
+        return np.clip((x - los) / span, 0.0, 1.0)
+
+    def decode(u):
+        u = np.clip(np.asarray(u, dtype=float), 0.0, 1.0)
+        x = los + u * span
+        x = np.where(is_log, np.exp(x), x)
+        return {k: float(v) for k, v in zip(FIT_PARAM_KEYS, x)}
+
+    return encode, decode
+
+
+def fit_CEXI(signal_data, protocol, bounds=None, n_init=12, x0=None, seed=None):
+    """
+    Fit the CEXI model to signal data.
+
+    The optimization is carried out in a normalized [0, 1] coordinate per
+    parameter (linear for R and f, logarithmic for Di, De and kappa). This
+    removes the ~9-order-of-magnitude scale gap between the radius (μm) and the
+    diffusivities (m²/s) that otherwise makes the raw-parameter L-BFGS-B
+    gradients ill-conditioned and stalls the fit.
+
+    Parameters
+    ----------
     signal_data : array
-        Measured signal values
+        Measured signal values.
     protocol : Protocol
-        Acquisition protocol
-    bounds : dict
-        Parameter bounds with keys 'R', 'Di', 'De', 'f', 'kappa'
+        Acquisition protocol.
+    bounds : dict, optional
+        Parameter bounds with keys 'R', 'Di', 'De', 'f', 'kappa'.
     n_init : int
-        Number of random initializations
-        
-    Returns:
-    --------
-    fitted_params : dict
-        Best-fit parameters
+        Number of random restarts (multi-start).
+    x0 : dict, optional
+        Optional explicit first guess (physical units); used in addition to
+        the random restarts.
+    seed : int, optional
+        Seed for the restart RNG, for reproducible fits.
+
+    Returns
+    -------
+    fitted_params : dict or None
+        Best-fit parameters in physical units.
     fit_cost : float
-        Final cost (RMSE)
+        Final cost (RMSE on the normalized signal).
     """
-    
-    # Default bounds based on paper
+
+    # Default parameter bounds
     if bounds is None:
         bounds = {
             'R': (2.0, 15.0),       # μm
@@ -486,66 +557,43 @@ def fit_CEXI(signal_data, protocol, bounds=None, n_init=5):
             'f': (0.3, 0.85),       # fraction
             'kappa': (1.0, 100.0)   # μm/s
         }
-    
-    # Normalize signal
+
+    encode, decode = _make_param_transforms(bounds)
+
+    # Normalize signal once
     signal_norm = protocol.normalize_sig(signal_data)
-    
-    # Objective function
-    def objective(params):
-        R, Di, De, f, kappa = params
-        
-        # Check bounds
-        if (R < bounds['R'][0] or R > bounds['R'][1] or
-            Di < bounds['Di'][0] or Di > bounds['Di'][1] or
-            De < bounds['De'][0] or De > bounds['De'][1] or
-            f < bounds['f'][0] or f > bounds['f'][1] or
-            kappa < bounds['kappa'][0] or kappa > bounds['kappa'][1]):
-            return 1e10
-        
-        # Generate model signal
+
+    # Objective in normalized coordinates: u in [0, 1]^5
+    def objective(u):
+        p = decode(u)
         try:
-            signal_model = CEXI_sig(R, Di, De, f, kappa, protocol, normalize=True)
-            # RMSE
-            return np.sqrt(np.mean((signal_norm - signal_model)**2))
-        except:
+            signal_model = CEXI_sig(p['R'], p['Di'], p['De'], p['f'],
+                                    p['kappa'], protocol, normalize=True)
+            res = np.sqrt(np.mean((signal_norm - signal_model) ** 2))
+            return res if np.isfinite(res) else 1e10
+        except Exception:
             return 1e10
-    
-    # Multiple random initializations
-    best_result = None
-    best_cost = np.inf
-    
-    for _ in range(n_init):
-        # Random initialization within bounds
-        x0 = [
-            np.random.uniform(*bounds['R']),
-            np.random.uniform(*bounds['Di']),
-            np.random.uniform(*bounds['De']),
-            np.random.uniform(*bounds['f']),
-            np.random.uniform(*bounds['kappa'])
-        ]
-        
-        # Optimize
-        result = minimize(
-            objective, x0,
-            method='L-BFGS-B',
-            bounds=[bounds['R'], bounds['Di'], bounds['De'], 
-                   bounds['f'], bounds['kappa']]
-        )
-        
+
+    rng = np.random.default_rng(seed)
+    cube_bounds = [(0.0, 1.0)] * len(FIT_PARAM_KEYS)
+
+    # Build the list of starting points (encoded): optional explicit x0 first,
+    # then random restarts drawn uniformly in the unit cube.
+    starts = []
+    if x0 is not None:
+        starts.append(encode(x0))
+    starts.extend(rng.random(len(FIT_PARAM_KEYS)) for _ in range(n_init))
+
+    best_u, best_cost = None, np.inf
+    for u0 in starts:
+        result = minimize(objective, u0, method='L-BFGS-B', bounds=cube_bounds)
         if result.fun < best_cost:
             best_cost = result.fun
-            best_result = result
-    
-    if best_result is not None:
-        fitted_params = {
-            'R': best_result.x[0],
-            'Di': best_result.x[1],
-            'De': best_result.x[2],
-            'f': best_result.x[3],
-            'kappa': best_result.x[4]
-        }
-        return fitted_params, best_cost
-    
+            best_u = result.x
+
+    if best_u is not None:
+        return decode(best_u), float(best_cost)
+
     return None, np.inf
 
 # ============================================================================
@@ -606,10 +654,3 @@ def load_scheme_file(scheme_path):
     )
     
     return protocol
-
-print("✅ Paper-aligned CEXI implementation loaded!")
-print("Key fixes implemented:")
-print("  1. Exchange rates include (1-f) factor")
-print("  2. Canonical sphere signal series (no empirical corrections)")
-print("  3. Parameter validation with warnings")
-print("  4. High permeability instability warnings")

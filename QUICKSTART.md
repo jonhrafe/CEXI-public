@@ -1,40 +1,28 @@
-# CEXI Tutorial - Quick Start Guide
+# CEXI Tutorial — Quick Start
 
-### Step 1: Install Requirements
+### 1. Install requirements
 ```bash
 pip install numpy scipy matplotlib jupyter
 ```
 
-### Step 2: Launch Tutorial
+### 2. Launch the tutorial
 ```bash
-jupyter notebook CEXI_Tutorial_PaperAligned.ipynb
+jupyter notebook CEXI_Tutorial.ipynb
 ```
 
-### Exchange Effects ✅
+### Exchange effect
+CEXI signal at `b = 2000 s/mm²` (R = 5 μm, Di = 1e-9, De = 2e-9 m²/s, f = 0.65):
 ```
-CEXI signal with membrane permeability:
-   κ=  0 μm/s: S(b=2000) = 0.5877  ← No exchange
-   κ= 25 μm/s: S(b=2000) = 0.5366  ← Medium exchange
-   κ=100 μm/s: S(b=2000) = 0.4366  ← High exchange (unstable!)
+   κ =   0 μm/s:  S = 0.5584   ← no exchange
+   κ =  25 μm/s:  S = 0.4452   ← moderate exchange
+   κ = 100 μm/s:  S = 0.3220   ← strong exchange
 ```
-## Key Concepts
 
-1. **Individual Compartments**
-   - Intracellular: Restricted diffusion in spheres
-   - Extracellular: Hindered diffusion (exponential decay)
+## Key concepts
 
-2. **Exchange Modeling**
-   - Kärger model with proper rate formula
-   - Time-dependent exchange effects
-   - Multi-delta protocol
-
-3. **Model Fitting**
-   - 5-parameter CEXI estimation
-   - Noise handling with Rician noise
-   - Parameter identifiability analysis
-
-4. **Protocol Optimization**
-   - Single vs multi-delta comparison
-   - Best practice recommendations
-
-### Issues?
+1. **Compartments** — intracellular (restricted diffusion in spheres) and
+   extracellular (Gaussian / hindered diffusion).
+2. **Exchange** — Kärger model, `k_i = 3κ/R`, with multi-Δ acquisitions to probe
+   the time dependence.
+3. **Fitting** — 5-parameter estimation (`R, Di, De, f, κ`) with Rician-noise
+   handling.
